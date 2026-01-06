@@ -1,0 +1,7 @@
+node_modules/
+absensi/*.json
+absensi/*.jpg
+absensi/*.jpeg
+absensi/*.png
+absensi/*.gif
+*.log
