@@ -1,35 +1,21 @@
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
 const xlsx = require('xlsx');
+const { put } = require('@vercel/blob');
+const { getCollection } = require('./lib/mongodb');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('.')); // Serve static files
 
-// Setup multer untuk upload foto
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        const absensiDir = path.join(__dirname, 'absensi');
-        if (!fs.existsSync(absensiDir)) {
-            fs.mkdirSync(absensiDir, { recursive: true });
-        }
-        cb(null, absensiDir);
-    },
-    filename: (req, file, cb) => {
-        const timestamp = Date.now();
-        const ext = path.extname(file.originalname);
-        cb(null, `foto_${timestamp}${ext}`);
-    }
-});
-
+// Setup multer untuk upload (memory storage untuk Vercel)
 const upload = multer({ 
-    storage: storage,
+    storage: multer.memoryStorage(),
     limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
     fileFilter: (req, file, cb) => {
         const allowedTypes = /jpeg|jpg|png|gif/;
@@ -59,7 +45,7 @@ app.get('/dashboard', (req, res) => {
 });
 
 // Route untuk submit absensi
-app.post('/submit-absensi', upload.single('foto'), (req, res) => {
+app.post('/submit-absensi', upload.single('foto'), async (req, res) => {
     try {
         const { nama, area, jenis, waktuMulai, waktuSelesai, desc, timestamp } = req.body;
         
@@ -78,107 +64,103 @@ app.post('/submit-absensi', upload.single('foto'), (req, res) => {
             });
         }
 
-        // Siapkan data absensi
+        // Upload foto ke Vercel Blob
+        const filename = `foto_${Date.now()}_${req.file.originalname}`;
+        const blob = await put(filename, req.file.buffer, {
+            access: 'public',
+            token: process.env.BLOB_READ_WRITE_TOKEN
+        });
+
+        // Simpan data ke MongoDB
+        const collection = await getCollection('absensi');
+        
         const dataAbsensi = {
-            timestamp: timestamp || new Date().toISOString(),
+            timestamp: timestamp ? new Date(timestamp) : new Date(),
             nama,
             area,
             jenis,
             waktuMulai,
             waktuSelesai,
             deskripsi: desc,
-            foto: req.file.filename
+            foto: blob.url,
+            createdAt: new Date()
         };
 
-        // Simpan ke file JSON
-        const fileName = `absensi_${Date.now()}.json`;
-        const filePath = path.join(__dirname, 'absensi', fileName);
+        const result = await collection.insertOne(dataAbsensi);
         
-        fs.writeFileSync(filePath, JSON.stringify(dataAbsensi, null, 2));
-
         res.json({ 
             success: true, 
             message: 'Data absensi berhasil disimpan!',
-            data: dataAbsensi
+            data: {
+                id: result.insertedId,
+                ...dataAbsensi
+            }
         });
 
     } catch (error) {
         console.error('Error:', error);
         res.status(500).json({ 
             success: false, 
-            message: 'Terjadi kesalahan saat menyimpan data!' 
+            message: 'Terjadi kesalahan saat menyimpan data!',
+            error: error.message 
         });
     }
 });
 
 // API untuk mendapatkan semua data absensi
-app.get('/api/absensi', (req, res) => {
+app.get('/api/absensi', async (req, res) => {
     try {
-        const absensiDir = path.join(__dirname, 'absensi');
+        const collection = await getCollection('absensi');
         
-        if (!fs.existsSync(absensiDir)) {
-            return res.json({ 
-                success: true, 
-                data: [] 
-            });
-        }
+        const allAbsensi = await collection
+            .find({})
+            .sort({ timestamp: -1 })
+            .toArray();
 
-        const files = fs.readdirSync(absensiDir);
-        const jsonFiles = files.filter(file => file.endsWith('.json'));
-        
-        const allAbsensi = jsonFiles.map(file => {
-            const filePath = path.join(absensiDir, file);
-            const fileContent = fs.readFileSync(filePath, 'utf8');
-            return JSON.parse(fileContent);
-        });
-
-        // Sort by timestamp (newest first)
-        allAbsensi.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        // Format data untuk response
+        const formattedData = allAbsensi.map(item => ({
+            id: item._id,
+            timestamp: item.timestamp,
+            nama: item.nama,
+            area: item.area,
+            jenis: item.jenis,
+            waktuMulai: item.waktuMulai,
+            waktuSelesai: item.waktuSelesai,
+            deskripsi: item.deskripsi,
+            foto: item.foto
+        }));
 
         res.json({ 
             success: true, 
-            data: allAbsensi 
+            data: formattedData 
         });
 
     } catch (error) {
         console.error('Error:', error);
         res.status(500).json({ 
             success: false, 
-            message: 'Terjadi kesalahan saat mengambil data!' 
+            message: 'Terjadi kesalahan saat mengambil data!',
+            error: error.message 
         });
     }
 });
 
 // API untuk export ke Excel
-app.get('/api/export-excel', (req, res) => {
+app.get('/api/export-excel', async (req, res) => {
     try {
-        const absensiDir = path.join(__dirname, 'absensi');
+        const collection = await getCollection('absensi');
         
-        if (!fs.existsSync(absensiDir)) {
+        const allAbsensi = await collection
+            .find({})
+            .sort({ timestamp: -1 })
+            .toArray();
+        
+        if (allAbsensi.length === 0) {
             return res.status(404).json({ 
                 success: false, 
                 message: 'Tidak ada data untuk di-export' 
             });
         }
-
-        const files = fs.readdirSync(absensiDir);
-        const jsonFiles = files.filter(file => file.endsWith('.json'));
-        
-        if (jsonFiles.length === 0) {
-            return res.status(404).json({ 
-                success: false, 
-                message: 'Tidak ada data untuk di-export' 
-            });
-        }
-
-        const allAbsensi = jsonFiles.map(file => {
-            const filePath = path.join(absensiDir, file);
-            const fileContent = fs.readFileSync(filePath, 'utf8');
-            return JSON.parse(fileContent);
-        });
-
-        // Sort by timestamp (newest first)
-        allAbsensi.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
         // Prepare data for Excel
         const excelData = allAbsensi.map((item, index) => {
@@ -201,7 +183,7 @@ app.get('/api/export-excel', (req, res) => {
                 'Waktu Mulai': item.waktuMulai,
                 'Waktu Selesai': item.waktuSelesai,
                 'Deskripsi': item.deskripsi,
-                'URL Foto': `http://localhost:${PORT}/absensi/${item.foto}`
+                'URL Foto': item.foto
             };
         });
 
@@ -220,7 +202,7 @@ app.get('/api/export-excel', (req, res) => {
             { wch: 12 }, // Waktu Mulai
             { wch: 12 }, // Waktu Selesai
             { wch: 40 }, // Deskripsi
-            { wch: 50 }  // URL Foto
+            { wch: 60 }  // URL Foto
         ];
 
         xlsx.utils.book_append_sheet(workbook, worksheet, 'Data Absensi');
@@ -239,14 +221,40 @@ app.get('/api/export-excel', (req, res) => {
         console.error('Error:', error);
         res.status(500).json({ 
             success: false, 
-            message: 'Terjadi kesalahan saat export data!' 
+            message: 'Terjadi kesalahan saat export data!',
+            error: error.message 
         });
     }
 });
 
-// Start server
-app.listen(PORT, () => {
-    console.log(`Server berjalan di http://localhost:${PORT}`);
-    console.log(`Buka http://localhost:${PORT} untuk dashboard`);
-    console.log(`Buka http://localhost:${PORT}/absen untuk input absensi`);
+// Health check endpoint
+app.get('/api/health', async (req, res) => {
+    try {
+        const collection = await getCollection('absensi');
+        await collection.findOne({}); // Test connection
+        
+        res.json({ 
+            success: true, 
+            message: 'Server and database are running',
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        res.status(500).json({ 
+            success: false, 
+            message: 'Database connection error',
+            error: error.message
+        });
+    }
 });
+
+// Start server (untuk development local)
+if (process.env.NODE_ENV !== 'production') {
+    app.listen(PORT, () => {
+        console.log(`Server berjalan di http://localhost:${PORT}`);
+        console.log(`Buka http://localhost:${PORT} untuk dashboard`);
+        console.log(`Buka http://localhost:${PORT}/absen untuk input absensi`);
+    });
+}
+
+// Export untuk Vercel
+module.exports = app;
