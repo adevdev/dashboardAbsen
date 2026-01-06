@@ -65,10 +65,18 @@ app.post('/submit-absensi', upload.single('foto'), async (req, res) => {
         }
 
         // Upload foto ke Vercel Blob
-        const filename = `foto_${Date.now()}_${req.file.originalname}`;
+        // Bersihkan nama file: hapus spasi, karakter special, dan gunakan underscore
+        const cleanFilename = req.file.originalname
+            .replace(/\s+/g, '_')  // Ganti spasi dengan underscore
+            .replace(/[^a-zA-Z0-9._-]/g, '')  // Hapus karakter special
+            .toLowerCase();  // Lowercase semua
+        
+        const filename = `foto_${Date.now()}_${cleanFilename}`;
         const blob = await put(filename, req.file.buffer, {
             access: 'public',
-            token: process.env.BLOB_READ_WRITE_TOKEN
+            token: process.env.BLOB_READ_WRITE_TOKEN,
+            contentType: req.file.mimetype,
+            addRandomSuffix: false
         });
 
         // Simpan data ke MongoDB
@@ -98,11 +106,23 @@ app.post('/submit-absensi', upload.single('foto'), async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Error:', error);
+        console.error('Error detail:', error);
+        
+        let errorMessage = 'Terjadi kesalahan saat menyimpan data!';
+        
+        if (error.message.includes('MONGODB_URI')) {
+            errorMessage = 'Database tidak terhubung. Periksa MONGODB_URI di environment variables.';
+        } else if (error.message.includes('BLOB')) {
+            errorMessage = 'Gagal upload foto. Periksa BLOB_READ_WRITE_TOKEN di environment variables.';
+        } else if (error.message.includes('MongoServerError')) {
+            errorMessage = 'Koneksi ke MongoDB gagal. Periksa password dan IP whitelist.';
+        }
+        
         res.status(500).json({ 
             success: false, 
-            message: 'Terjadi kesalahan saat menyimpan data!',
-            error: error.message 
+            message: errorMessage,
+            error: error.message,
+            details: process.env.NODE_ENV === 'development' ? error.stack : undefined
         });
     }
 });
